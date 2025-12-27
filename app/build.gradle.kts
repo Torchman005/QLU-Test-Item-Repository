@@ -4,6 +4,9 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// Temporary build directory to bypass file lock issues
+layout.buildDirectory.set(file("build_temp_v2"))
+
 android {
     namespace = "com.example.qlutestitemrepository"
     compileSdk = 34
@@ -61,4 +64,5 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+    implementation("androidx.documentfile:documentfile:1.0.1")
 }

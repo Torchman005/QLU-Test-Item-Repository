@@ -13,3 +13,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+/app/build_temp
+/app/build_temp_v2
+build_temp/
+build_temp_v2/

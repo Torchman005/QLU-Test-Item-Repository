@@ -7,6 +7,8 @@ import android.os.Environment
 import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.core.content.FileProvider
+import androidx.core.content.edit
+import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -15,34 +17,98 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+data class AppFile(
+    val name: String,
+    val isDirectory: Boolean,
+    val lastModified: Long,
+    val length: Long,
+    val file: File? = null,
+    val documentFile: DocumentFile? = null
+) {
+    val extension: String
+        get() = name.substringAfterLast('.', "")
+}
+
 object FileUtils {
+    private const val PREFS_NAME = "app_prefs"
+    private const val KEY_SAF_URI = "saf_uri"
 
     fun getTestsRoot(): File {
         return File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "tests")
     }
 
-    fun listFiles(subPath: String = ""): List<File> {
-        val root = getTestsRoot()
-        val targetDir = if (subPath.isEmpty()) root else File(root, subPath)
-        
-        if (!targetDir.exists()) {
-            targetDir.mkdirs()
+    fun listFiles(context: Context, subPath: String = ""): List<AppFile> {
+        // 1. Try standard File API (MANAGE_EXTERNAL_STORAGE)
+        if (Environment.isExternalStorageManager()) {
+             val root = getTestsRoot()
+             val targetDir = if (subPath.isEmpty()) root else File(root, subPath)
+             if (!targetDir.exists()) targetDir.mkdirs()
+             
+             return targetDir.listFiles()?.map { 
+                 AppFile(it.name, it.isDirectory, it.lastModified(), it.length(), file = it)
+             }?.sortedWith(compareBy({ !it.isDirectory }, { it.name })) ?: emptyList()
         }
-        
-        return targetDir.listFiles()?.toList()?.sortedWith(compareBy({ !it.isDirectory }, { it.name })) ?: emptyList()
+
+        // 2. Try SAF (DocumentFile)
+        val safUriStr = getSafUri(context)
+        if (safUriStr != null) {
+            val treeUri = Uri.parse(safUriStr)
+            val rootDoc = DocumentFile.fromTreeUri(context, treeUri)
+            if (rootDoc != null && rootDoc.canRead()) {
+                // Navigate to subPath
+                var targetDoc = rootDoc
+                if (subPath.isNotEmpty()) {
+                    val parts = subPath.split("/")
+                    for (part in parts) {
+                        targetDoc = targetDoc?.findFile(part)
+                        if (targetDoc == null) break
+                    }
+                }
+
+                return targetDoc?.listFiles()?.map { 
+                    AppFile(it.name ?: "", it.isDirectory, it.lastModified(), it.length(), documentFile = it)
+                }?.sortedWith(compareBy({ !it.isDirectory }, { it.name })) ?: emptyList()
+            }
+        }
+
+        return emptyList()
+    }
+    
+    fun saveSafUri(context: Context, uri: Uri) {
+        context.contentResolver.takePersistableUriPermission(
+            uri,
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        )
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit {
+            putString(KEY_SAF_URI, uri.toString())
+        }
     }
 
-    fun deleteFile(file: File): Boolean {
+    fun getSafUri(context: Context): String? {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getString(KEY_SAF_URI, null)
+    }
+
+    fun deleteFile(context: Context, appFile: AppFile): Boolean {
         return try {
-            if (file.isDirectory) {
-                file.deleteRecursively()
+            if (appFile.file != null) {
+                if (appFile.file.isDirectory) appFile.file.deleteRecursively() else appFile.file.delete()
+            } else if (appFile.documentFile != null) {
+                appFile.documentFile.delete()
             } else {
-                file.delete()
+                false
             }
         } catch (e: Exception) {
             e.printStackTrace()
             false
         }
+    }
+    
+    // Legacy helper for other screens using File directly (might need refactor later)
+    fun listFilesLegacy(subPath: String = ""): List<File> {
+         val root = getTestsRoot()
+         val targetDir = if (subPath.isEmpty()) root else File(root, subPath)
+         if (!targetDir.exists()) targetDir.mkdirs()
+         return targetDir.listFiles()?.toList()?.sortedWith(compareBy({ !it.isDirectory }, { it.name })) ?: emptyList()
     }
 
     fun formatSize(size: Long): String {
@@ -57,15 +123,89 @@ object FileUtils {
         return sdf.format(Date(timestamp))
     }
 
-    fun openWithOther(context: Context, file: File) {
-        if (!file.exists()) {
-            Toast.makeText(context, "文件不存在", Toast.LENGTH_SHORT).show()
-            return
-        }
+    fun openFileDirectly(context: Context, appFile: AppFile) {
         try {
-            val uri = getFileUri(context, file)
+            val uri = if (appFile.file != null) {
+                 getFileUri(context, appFile.file)
+            } else if (appFile.documentFile != null) {
+                 appFile.documentFile.uri
+            } else {
+                return
+            }
+            
+            val mimeType = if (appFile.file != null) getMimeType(appFile.file) else appFile.documentFile?.type ?: "*/*"
+
             val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, getMimeType(file))
+                setDataAndType(uri, mimeType)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(context, "无法直接打开文件，请尝试'用其他应用打开'", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun shareFiles(context: Context, appFiles: List<AppFile>) {
+        if (appFiles.isEmpty()) return
+
+        try {
+            val uris = ArrayList<Uri>()
+            var mimeType = "*/*"
+            
+            appFiles.forEach { appFile ->
+                val uri = if (appFile.file != null) {
+                     getFileUri(context, appFile.file)
+                } else if (appFile.documentFile != null) {
+                     appFile.documentFile.uri
+                } else {
+                    null
+                }
+                if (uri != null) {
+                    uris.add(uri)
+                    // Simple mime type detection: if all are same, use it, else */*
+                    // For now keeping it simple as */* or maybe image/* if useful
+                }
+            }
+
+            if (uris.isEmpty()) return
+
+            val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                type = mimeType
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            
+            context.startActivity(Intent.createChooser(intent, "分享文件"))
+        } catch (e: Exception) {
+            Toast.makeText(context, "分享失败: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+    
+    fun deleteFiles(context: Context, appFiles: List<AppFile>): Boolean {
+        var allSuccess = true
+        appFiles.forEach { 
+            if (!deleteFile(context, it)) {
+                allSuccess = false
+            }
+        }
+        return allSuccess
+    }
+
+    fun openWithOther(context: Context, appFile: AppFile) {
+        try {
+            val uri = if (appFile.file != null) {
+                 getFileUri(context, appFile.file)
+            } else if (appFile.documentFile != null) {
+                 appFile.documentFile.uri
+            } else {
+                return
+            }
+            
+            val mimeType = if (appFile.file != null) getMimeType(appFile.file) else appFile.documentFile?.type ?: "*/*"
+
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mimeType)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
@@ -75,31 +215,15 @@ object FileUtils {
         }
     }
 
-    fun exportFile(context: Context, file: File) {
-        // Since the file is already in Downloads/tests, it is technically "exported" to a public directory.
-        // However, "Export" might mean copying it to a specific location user chooses, or just sharing.
-        // Given requirement "Export" vs "Share" usually means saving somewhere else.
-        // But since we are on Android, "Export" usually implies System Picker or just Share intent.
-        // The prompt also asks for "Share" in previous logic, but here asks for "Export".
-        // Let's implement Export as a "Share/Send" intent but labeled generically, 
-        // OR simply copy it to the root of Downloads if it's deep inside?
-        // Let's use the Share intent as it's the most flexible "Export" mechanism without SAF complexity.
-        // Wait, the requirement says "Option 3: Export".
-        // Let's implement it as a Share intent for now, as it covers most "Export" use cases (email, drive, etc).
-        shareFile(context, file, null)
+    fun exportFile(context: Context, appFile: AppFile) {
+         val uri = if (appFile.file != null) getFileUri(context, appFile.file) else appFile.documentFile?.uri ?: return
+         val mimeType = if (appFile.file != null) getMimeType(appFile.file) else appFile.documentFile?.type ?: "*/*"
+         
+         shareFileUri(context, uri, mimeType, null)
     }
-    
-    // Modified shareFile to be more generic or support specific platforms
-    fun shareFile(context: Context, file: File, platform: SharePlatform?) {
-        if (!file.exists()) {
-            Toast.makeText(context, "文件未找到", Toast.LENGTH_SHORT).show()
-            return
-        }
 
-        try {
-            val uri = getFileUri(context, file)
-            val mimeType = getMimeType(file)
-
+    private fun shareFileUri(context: Context, uri: Uri, mimeType: String?, platform: SharePlatform?) {
+         try {
             val intent = Intent(Intent.ACTION_SEND).apply {
                 type = mimeType
                 putExtra(Intent.EXTRA_STREAM, uri)
@@ -126,8 +250,14 @@ object FileUtils {
             Toast.makeText(context, "导出失败: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
+
+    // Keep existing shareFile for legacy callers
+    fun shareFile(context: Context, file: File, platform: SharePlatform?) {
+        val uri = getFileUri(context, file)
+        val mimeType = getMimeType(file)
+        shareFileUri(context, uri, mimeType, platform)
+    }
     
-    // Existing helper
     fun shareFile(context: Context, fileName: String, platform: SharePlatform) {
          val file = getTestsFile(fileName)
          shareFile(context, file, platform)
