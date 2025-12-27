@@ -50,6 +50,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 
+import androidx.compose.runtime.remember
+
 class MainActivity : ComponentActivity() {
     private val mainViewModel by viewModels<MainViewModel>()
 
@@ -59,14 +61,18 @@ class MainActivity : ComponentActivity() {
         setContent {
             val context = LocalContext.current
             
-            // Auto request permission on first launch
+            // Auto request permission logic (Run only once)
+            val sharedPreferences = remember { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
+            val hasRequested = remember { sharedPreferences.getBoolean("has_requested_storage_permission", false) }
+            
             val permissionLauncher = rememberLauncherForActivityResult(
                 ActivityResultContracts.RequestMultiplePermissions()
             ) { }
 
             LaunchedEffect(Unit) {
-                if (!checkStoragePermission(context)) {
+                if (!checkStoragePermission(context) && !hasRequested) {
                      requestStoragePermission(context, permissionLauncher)
+                     sharedPreferences.edit().putBoolean("has_requested_storage_permission", true).apply()
                 }
             }
             
