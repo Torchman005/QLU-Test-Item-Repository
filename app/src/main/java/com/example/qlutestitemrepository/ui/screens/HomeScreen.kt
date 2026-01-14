@@ -153,7 +153,7 @@ fun HomeScreen(
                 TextButton(onClick = {
                     fileToRedownload = null
                     scope.launch {
-                        if (FileUtils.isFileDownloaded(file.path)) {
+                        if (FileUtils.isFileDownloaded(file.path, context)) {
                              Toast.makeText(context, "文件已存在", Toast.LENGTH_SHORT).show()
                         }
                         
@@ -303,7 +303,7 @@ fun HomeScreen(
 
                         items(filteredItems) { item ->
                             val isDownloaded = remember(refreshTrigger, item.name) {
-                                item.type != "dir" && FileUtils.isFileDownloaded(item.path)
+                                item.type != "dir" && FileUtils.isFileDownloaded(item.path, context)
                             }
 
                             Card(
@@ -316,7 +316,7 @@ fun HomeScreen(
                                                 viewModel.navigateTo(item)
                                             } else {
                                                 // Check if file is already downloaded in Downloads folder
-                                                if (FileUtils.isFileDownloaded(item.path)) {
+                                                if (FileUtils.isFileDownloaded(item.path, context)) {
                                                     FileUtils.openFile(context, item.path, item.downloadUrl ?: "")
                                                 } else {
                                                     // Handle file click -> Show Dialog

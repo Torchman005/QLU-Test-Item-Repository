@@ -306,15 +306,52 @@ object FileUtils {
     suspend fun downloadToTests(context: Context, url: String, fileName: String): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                val destFile = getTestsFile(fileName)
-                // Ensure directory exists
-                destFile.parentFile?.mkdirs()
-                
-                URL(url).openStream().use { input ->
-                    destFile.outputStream().use { output ->
-                        input.copyTo(output)
+                val safUriStr = getSafUri(context)
+
+                if (safUriStr != null) {
+                    // ===== 使用 SAF 目录 =====
+                    val treeUri = Uri.parse(safUriStr)
+                    var current =
+                        DocumentFile.fromTreeUri(context, treeUri)
+                            ?: return@withContext false
+
+                    val parts = fileName.split("/")
+
+                    // 创建子目录
+                    for (i in 0 until parts.size - 1) {
+                        val dirName = parts[i]
+                        current =
+                            current.findFile(dirName)
+                                ?: current.createDirectory(dirName)
+                                ?: return@withContext false
+                    }
+
+                    val name = parts.last()
+                    val target =
+                        current.findFile(name)
+                            ?: current.createFile(
+                                "application/octet-stream",
+                                name
+                            )
+                            ?: return@withContext false
+
+                    context.contentResolver.openOutputStream(target.uri)?.use { output ->
+                        URL(url).openStream().use { input ->
+                            input.copyTo(output)
+                        }
+                    }
+                } else {
+                    // ===== fallback：Downloads/tests =====
+                    val destFile = getTestsFile(fileName)
+                    destFile.parentFile?.mkdirs()
+    
+                    URL(url).openStream().use { input ->
+                        destFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
                     }
                 }
+
                 true
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -323,7 +360,18 @@ object FileUtils {
         }
     }
 
-    fun isFileDownloaded(fileName: String): Boolean {
+    fun isFileDownloaded(fileName: String, context: Context): Boolean {
+        val safUriStr = getSafUri(context)
+        if (safUriStr != null) {
+            var current =
+                DocumentFile.fromTreeUri(context, Uri.parse(safUriStr))
+                    ?: return false
+
+            for (part in fileName.split("/")) {
+                current = current.findFile(part) ?: return false
+            }
+            return current.exists()
+        }
         return getTestsFile(fileName).exists()
     }
 
